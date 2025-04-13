@@ -198,7 +198,7 @@ class TextProcessor:
     
     def visualize_word_vectors(self, words=None, method='tsne', perplexity=30):
         """
-        Visualize word vectors in 2D space.
+        Visualize word vectors in 2D space with interactive tooltips.
         
         Args:
             words (list): List of words to visualize. If None, visualize all words.
@@ -229,31 +229,92 @@ class TextProcessor:
             pca = PCA(n_components=2)
             vectors_2d = pca.fit_transform(vectors)
             title = 'Word Vectors (PCA)'
+            # Store the explained variance for explanation
+            explained_variance = pca.explained_variance_ratio_
+            dimension_explanation = f"PCA dimensions explain {explained_variance[0]*100:.1f}% and {explained_variance[1]*100:.1f}% of variance"
         elif method.lower() == 'tsne':
             tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42)
             vectors_2d = tsne.fit_transform(vectors)
             title = 'Word Vectors (t-SNE)'
+            dimension_explanation = f"t-SNE dimensions represent semantic similarity (perplexity={perplexity})"
         else:
             raise ValueError("Method must be 'pca' or 'tsne'")
         
-        # Plot the word vectors
-        plt.figure(figsize=(12, 10))
-        plt.scatter(vectors_2d[:, 0], vectors_2d[:, 1], alpha=0.7)
+        # Create an interactive plot
+        fig, ax = plt.subplots(figsize=(12, 10))
+        scatter = ax.scatter(vectors_2d[:, 0], vectors_2d[:, 1], alpha=0.7)
         
         # Add word labels
         for i, word in enumerate(words):
-            plt.annotate(word, xy=(vectors_2d[i, 0], vectors_2d[i, 1]), 
+            ax.annotate(word, xy=(vectors_2d[i, 0], vectors_2d[i, 1]),
                         xytext=(5, 2), textcoords='offset points',
                         fontsize=10, alpha=0.8)
         
-        plt.title(title)
-        plt.grid(True, alpha=0.3)
+        # Add dimension explanation
+        ax.text(0.02, 0.98, dimension_explanation,
+                transform=ax.transAxes, fontsize=10,
+                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        # Create a tooltip function
+        def on_hover(event):
+            if event.inaxes == ax:
+                # Find the closest point
+                distances = np.sqrt((vectors_2d[:, 0] - event.xdata)**2 + (vectors_2d[:, 1] - event.ydata)**2)
+                closest_idx = np.argmin(distances)
+                
+                if distances[closest_idx] < 0.5:  # Only show tooltip if mouse is close enough
+                    word = words[closest_idx]
+                    word_idx = self.word_to_idx[word]
+                    
+                    # Get similar words for explanation
+                    similar_words = self.get_similar_words(word, top_n=5)
+                    similar_words_text = ", ".join([f"{w} ({s:.2f})" for w, s in similar_words])
+                    
+                    # Get vector dimensions
+                    vector = self.word_vectors[word_idx]
+                    
+                    # Create tooltip text
+                    tooltip_text = f"Word: {word}\n"
+                    tooltip_text += f"Frequency: {self.word_freqs.get(word, 'N/A')}\n"
+                    tooltip_text += f"Similar words: {similar_words_text}\n"
+                    tooltip_text += f"Vector dimensions (first 5): {vector[:5]}\n"
+                    tooltip_text += f"Vector magnitude: {np.linalg.norm(vector):.3f}"
+                    
+                    # Update or create annotation
+                    try:
+                        self.tooltip.set_text(tooltip_text)
+                        self.tooltip.xy = (vectors_2d[closest_idx, 0], vectors_2d[closest_idx, 1])
+                        self.tooltip.set_visible(True)
+                    except AttributeError:
+                        self.tooltip = ax.annotate(tooltip_text,
+                                                xy=(vectors_2d[closest_idx, 0], vectors_2d[closest_idx, 1]),
+                                                xytext=(20, 20), textcoords="offset points",
+                                                bbox=dict(boxstyle="round,pad=0.5", fc="yellow", alpha=0.8),
+                                                arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=0.3"))
+                    fig.canvas.draw_idle()
+                else:
+                    try:
+                        self.tooltip.set_visible(False)
+                        fig.canvas.draw_idle()
+                    except AttributeError:
+                        pass
+        
+        # Connect the hover event
+        fig.canvas.mpl_connect("motion_notify_event", on_hover)
+        
+        ax.set_title(title)
+        ax.grid(True, alpha=0.3)
         plt.tight_layout()
+        
+        # Add instructions
+        plt.figtext(0.5, 0.01, "Hover over points to see detailed information about each word",
+                   ha="center", fontsize=12, bbox={"facecolor":"lightgray", "alpha":0.5, "pad":5})
+        
         plt.show()
     
     def visualize_word_clusters(self, n_clusters=5):
         """
-        Visualize word clusters using K-means clustering.
+        Visualize word clusters using K-means clustering with interactive tooltips.
         
         Args:
             n_clusters (int): Number of clusters
@@ -271,41 +332,132 @@ class TextProcessor:
         tsne = TSNE(n_components=2, perplexity=30, random_state=42)
         vectors_2d = tsne.fit_transform(self.word_vectors)
         
-        # Plot the clusters
-        plt.figure(figsize=(12, 10))
+        # Calculate cluster centers in original space
+        cluster_centers = kmeans.cluster_centers_
+        
+        # Find words closest to cluster centers (most representative words)
+        representative_words = []
+        for cluster_id in range(n_clusters):
+            # Calculate distances to cluster center
+            distances = np.linalg.norm(self.word_vectors - cluster_centers[cluster_id], axis=1)
+            # Get indices of closest words
+            closest_indices = np.argsort(distances)[:5]  # Top 5 representative words
+            representative_words.append([self.idx_to_word[idx] for idx in closest_indices])
+        
+        # Create an interactive plot
+        fig, ax = plt.subplots(figsize=(12, 10))
+        
+        # Store scatter plots for each cluster
+        scatter_plots = []
         
         # Use different colors for different clusters
         for cluster_id in range(n_clusters):
-            cluster_points = vectors_2d[clusters == cluster_id]
-            plt.scatter(cluster_points[:, 0], cluster_points[:, 1], label=f'Cluster {cluster_id}', alpha=0.7)
+            cluster_mask = clusters == cluster_id
+            cluster_points = vectors_2d[cluster_mask]
+            scatter = ax.scatter(cluster_points[:, 0], cluster_points[:, 1],
+                                label=f'Cluster {cluster_id}', alpha=0.7)
+            scatter_plots.append((scatter, cluster_mask))
         
         # Add word labels for a subset of words
         top_words_per_cluster = 10
+        all_labeled_words = []
+        
         for cluster_id in range(n_clusters):
             # Get indices of words in this cluster
             cluster_indices = np.where(clusters == cluster_id)[0]
             
             # Get the most frequent words in this cluster
-            cluster_words = [(self.idx_to_word[idx], self.word_freqs[self.idx_to_word[idx]]) 
+            cluster_words = [(self.idx_to_word[idx], self.word_freqs[self.idx_to_word[idx]])
                             for idx in cluster_indices]
             cluster_words = sorted(cluster_words, key=lambda x: x[1], reverse=True)[:top_words_per_cluster]
             
             # Add labels for these words
             for word, _ in cluster_words:
                 idx = self.word_to_idx[word]
-                plt.annotate(word, xy=(vectors_2d[idx, 0], vectors_2d[idx, 1]), 
-                            xytext=(5, 2), textcoords='offset points',
-                            fontsize=9, alpha=0.8)
+                ax.annotate(word, xy=(vectors_2d[idx, 0], vectors_2d[idx, 1]),
+                           xytext=(5, 2), textcoords='offset points',
+                           fontsize=9, alpha=0.8)
+                all_labeled_words.append(word)
         
-        plt.title(f'Word Clusters (K-means, k={n_clusters})')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
+        # Add cluster explanations
+        cluster_explanations = []
+        for cluster_id in range(n_clusters):
+            explanation = f"Cluster {cluster_id} - Representative words: {', '.join(representative_words[cluster_id])}"
+            cluster_explanations.append(explanation)
+            
+        explanation_text = "\n".join(cluster_explanations)
+        ax.text(0.02, 0.98, explanation_text,
+                transform=ax.transAxes, fontsize=9,
+                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        # Create a tooltip function
+        def on_hover(event):
+            if event.inaxes == ax:
+                # Find the closest point
+                distances = np.sqrt((vectors_2d[:, 0] - event.xdata)**2 + (vectors_2d[:, 1] - event.ydata)**2)
+                closest_idx = np.argmin(distances)
+                
+                if distances[closest_idx] < 0.5:  # Only show tooltip if mouse is close enough
+                    word = self.idx_to_word[closest_idx]
+                    cluster_id = clusters[closest_idx]
+                    
+                    # Find similar words in the same cluster
+                    same_cluster_indices = np.where(clusters == cluster_id)[0]
+                    same_cluster_words = [self.idx_to_word[idx] for idx in same_cluster_indices
+                                         if self.idx_to_word[idx] != word][:10]
+                    
+                    # Calculate distance to cluster center
+                    distance_to_center = np.linalg.norm(self.word_vectors[closest_idx] - cluster_centers[cluster_id])
+                    
+                    # Get vector dimensions
+                    vector = self.word_vectors[closest_idx]
+                    
+                    # Create tooltip text
+                    tooltip_text = f"Word: {word}\n"
+                    tooltip_text += f"Cluster: {cluster_id}\n"
+                    tooltip_text += f"Frequency: {self.word_freqs.get(word, 'N/A')}\n"
+                    tooltip_text += f"Distance to cluster center: {distance_to_center:.3f}\n"
+                    tooltip_text += f"Related words in cluster: {', '.join(same_cluster_words[:5])}\n"
+                    tooltip_text += f"Vector dimensions (first 5): {vector[:5]}\n"
+                    tooltip_text += f"Vector magnitude: {np.linalg.norm(vector):.3f}"
+                    
+                    # Update or create annotation
+                    try:
+                        self.tooltip.set_text(tooltip_text)
+                        self.tooltip.xy = (vectors_2d[closest_idx, 0], vectors_2d[closest_idx, 1])
+                        self.tooltip.set_visible(True)
+                    except AttributeError:
+                        self.tooltip = ax.annotate(tooltip_text,
+                                                xy=(vectors_2d[closest_idx, 0], vectors_2d[closest_idx, 1]),
+                                                xytext=(20, 20), textcoords="offset points",
+                                                bbox=dict(boxstyle="round,pad=0.5", fc="yellow", alpha=0.8),
+                                                arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=0.3"))
+                    fig.canvas.draw_idle()
+                else:
+                    try:
+                        self.tooltip.set_visible(False)
+                        fig.canvas.draw_idle()
+                    except AttributeError:
+                        pass
+        
+        # Connect the hover event
+        fig.canvas.mpl_connect("motion_notify_event", on_hover)
+        
+        ax.set_title(f'Word Clusters (K-means, k={n_clusters})')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # Add instructions
+        plt.figtext(0.5, 0.01, "Hover over points to see detailed information about each word and its cluster",
+                   ha="center", fontsize=12, bbox={"facecolor":"lightgray", "alpha":0.5, "pad":5})
+        
         plt.tight_layout()
         plt.show()
     
     def visualize_word_weights(self):
         """
-        Visualize the weights (importance) of words based on frequency and vector magnitude.
+        Visualize the weights (importance) of words based on frequency and vector magnitude
+        with interactive tooltips and explanations.
         """
         if self.word_vectors is None:
             raise ValueError("Word vectors not created. Call create_word_vectors first.")
@@ -319,24 +471,149 @@ class TextProcessor:
         word_indices = [self.word_to_idx[word] for word in words]
         magnitudes = np.linalg.norm(self.word_vectors[word_indices], axis=1)
         
-        # Create a figure with two subplots
+        # Calculate additional metrics for explanation
+        # 1. Variance of each word vector (how distinctive the dimensions are)
+        variances = np.var(self.word_vectors[word_indices], axis=1)
+        
+        # 2. Average similarity to other words (how unique the word is)
+        avg_similarities = []
+        for idx in word_indices:
+            word_vec = self.word_vectors[idx]
+            # Compute cosine similarity with all other words
+            norm = np.linalg.norm(self.word_vectors, axis=1) * np.linalg.norm(word_vec)
+            similarities = np.dot(self.word_vectors, word_vec) / (norm + 1e-8)
+            # Average similarity (excluding self)
+            avg_sim = (np.sum(similarities) - 1.0) / (len(similarities) - 1)
+            avg_similarities.append(avg_sim)
+        
+        # Create an interactive figure with two subplots
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 8))
         
         # Plot word frequencies
-        ax1.barh(range(len(words)), freqs, align='center')
+        bars1 = ax1.barh(range(len(words)), freqs, align='center', color='skyblue')
         ax1.set_yticks(range(len(words)))
         ax1.set_yticklabels(words)
         ax1.set_title('Word Frequencies')
         ax1.set_xlabel('Frequency')
         
         # Plot vector magnitudes
-        ax2.barh(range(len(words)), magnitudes, align='center')
+        bars2 = ax2.barh(range(len(words)), magnitudes, align='center', color='lightgreen')
         ax2.set_yticks(range(len(words)))
         ax2.set_yticklabels(words)
         ax2.set_title('Word Vector Magnitudes')
         ax2.set_xlabel('Magnitude')
         
-        plt.tight_layout()
+        # Add explanation text
+        explanation = """
+        Word Weights Explanation:
+        
+        Frequency: How often a word appears in the corpus.
+        - Higher frequency words have more training examples
+        - They tend to have more stable representations
+        
+        Vector Magnitude: The L2 norm of the word vector.
+        - Larger magnitudes often indicate more distinctive words
+        - Words with similar meanings to many other words may have smaller magnitudes
+        - Words with unique contexts tend to have larger magnitudes
+        """
+        
+        fig.text(0.5, 0.01, explanation, ha='center', fontsize=10,
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        # Create tooltip functions
+        def hover_freq(event):
+            if event.inaxes == ax1:
+                # Find the closest bar
+                for i, bar in enumerate(bars1):
+                    if bar.contains(event)[0]:
+                        word = words[i]
+                        freq = freqs[i]
+                        magnitude = magnitudes[i]
+                        variance = variances[i]
+                        avg_sim = avg_similarities[i]
+                        
+                        # Create tooltip text
+                        tooltip_text = f"Word: {word}\n"
+                        tooltip_text += f"Frequency: {freq}\n"
+                        tooltip_text += f"Vector magnitude: {magnitude:.3f}\n"
+                        tooltip_text += f"Vector variance: {variance:.3f}\n"
+                        tooltip_text += f"Avg similarity: {avg_sim:.3f}\n"
+                        tooltip_text += f"Percentile rank: {100 * i / len(words):.1f}%"
+                        
+                        # Update or create annotation
+                        try:
+                            self.tooltip1.set_text(tooltip_text)
+                            self.tooltip1.xy = (freq, i)
+                            self.tooltip1.set_visible(True)
+                        except AttributeError:
+                            self.tooltip1 = ax1.annotate(tooltip_text,
+                                                    xy=(freq, i),
+                                                    xytext=(20, 0), textcoords="offset points",
+                                                    bbox=dict(boxstyle="round,pad=0.5", fc="yellow", alpha=0.8),
+                                                    arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=0.3"))
+                        fig.canvas.draw_idle()
+                        return
+                
+                # If not hovering over a bar, hide the tooltip
+                try:
+                    self.tooltip1.set_visible(False)
+                    fig.canvas.draw_idle()
+                except AttributeError:
+                    pass
+        
+        def hover_mag(event):
+            if event.inaxes == ax2:
+                # Find the closest bar
+                for i, bar in enumerate(bars2):
+                    if bar.contains(event)[0]:
+                        word = words[i]
+                        freq = freqs[i]
+                        magnitude = magnitudes[i]
+                        variance = variances[i]
+                        avg_sim = avg_similarities[i]
+                        
+                        # Get similar words
+                        similar_words = self.get_similar_words(word, top_n=5)
+                        similar_words_text = ", ".join([f"{w}" for w, _ in similar_words])
+                        
+                        # Create tooltip text
+                        tooltip_text = f"Word: {word}\n"
+                        tooltip_text += f"Frequency: {freq}\n"
+                        tooltip_text += f"Vector magnitude: {magnitude:.3f}\n"
+                        tooltip_text += f"Vector variance: {variance:.3f}\n"
+                        tooltip_text += f"Avg similarity: {avg_sim:.3f}\n"
+                        tooltip_text += f"Similar words: {similar_words_text}"
+                        
+                        # Update or create annotation
+                        try:
+                            self.tooltip2.set_text(tooltip_text)
+                            self.tooltip2.xy = (magnitude, i)
+                            self.tooltip2.set_visible(True)
+                        except AttributeError:
+                            self.tooltip2 = ax2.annotate(tooltip_text,
+                                                    xy=(magnitude, i),
+                                                    xytext=(20, 0), textcoords="offset points",
+                                                    bbox=dict(boxstyle="round,pad=0.5", fc="yellow", alpha=0.8),
+                                                    arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=0.3"))
+                        fig.canvas.draw_idle()
+                        return
+                
+                # If not hovering over a bar, hide the tooltip
+                try:
+                    self.tooltip2.set_visible(False)
+                    fig.canvas.draw_idle()
+                except AttributeError:
+                    pass
+        
+        # Connect the hover events
+        fig.canvas.mpl_connect("motion_notify_event", hover_freq)
+        fig.canvas.mpl_connect("motion_notify_event", hover_mag)
+        
+        # Add instructions
+        plt.figtext(0.5, 0.95, "Hover over bars to see detailed information about each word",
+                   ha="center", fontsize=12, bbox={"facecolor":"lightgray", "alpha":0.5, "pad":5})
+        
+        plt.tight_layout(rect=[0, 0.1, 1, 0.95])  # Adjust layout to make room for text
         plt.show()
     
     def explain_word_embeddings(self):
